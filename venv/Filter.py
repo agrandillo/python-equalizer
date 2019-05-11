@@ -17,13 +17,13 @@ MAX_CUTOFF_LOW = 500
 INT16_MAX_VALUE = 32767
 FRAME_CHUNK = 20
 
-
 class Filter (threading.Thread):
 
-    def __init__(self, filename):
+    def __init__(self):
         threading.Thread.__init__(self)
-        self.isStreamActive = True
-        self.filename = filename
+        self.is_thread_initiated = False
+        self.is_thread_alive = True
+        self.daemon = True
         self.output_sum = None
         self.counter = 0
         self.low_bound = 0
@@ -31,9 +31,24 @@ class Filter (threading.Thread):
         self.low_coefficient = 0.5
         self.band_coefficient = 0.5
         self.high_coefficient = 0.5
+        self.stream = None
+        self.low_signal = 0
+        self.band_signal = 0
+        self.high_signal = 0
 
-    def set_stream_activity(self, isActive):
-        self.isStreamActive = isActive
+    def read_file_data(self, file_name):
+        self.file_name = file_name
+        self.sr, self.signal = wavfile.read(self.file_name)
+        self.spec_indicator = wave.open(self.file_name, 'rb')
+
+    def is_stream_paused(self):
+        return self.stream and self.stream.is_stopped()
+
+    def pause_stream(self):
+        self.stream.stop_stream()
+
+    def play_stream(self):
+        self.stream.start_stream()
 
     def set_low_coefficient(self, value):
         self.low_coefficient = float(value)
@@ -102,63 +117,63 @@ class Filter (threading.Thread):
         high_bound = self.counter * frame_count
         return self.output_sum[self.low_bound:high_bound].tobytes(), pyaudio.paContinue
 
-    def run(self):
-
-        sr, signal = wavfile.read(self.filename)
-        spec_indicator = wave.open(self.filename, 'rb')
-        fs = sr
+    def before_run(self):
+        self.is_thread_initiated = True
+        fs = self.sr
         cutoff_low = MAX_CUTOFF_LOW
         order_low = 2
 
-        highest_value = self.get_highest_value(signal)
+        highest_value = self.get_highest_value(self.signal)
         down_sampling_factor = self.get_down_sampling_factor(highest_value)
 
-        output_low = self.butter_lowpass_filter(signal, cutoff_low, fs, order_low)
-        low_signal = np.int16(output_low / down_sampling_factor)
+        output_low = self.butter_lowpass_filter(self.signal, cutoff_low, fs, order_low)
+        self.low_signal = np.int16(output_low / down_sampling_factor)
         del output_low
 
         cutoff_high = MIN_CUTOFF_HIGH
         order_high = 2
 
-        output_high = self.butter_highpass_filter(signal, cutoff_high, fs, order_high)
-        high_signal = np.int16(output_high / down_sampling_factor)
+        output_high = self.butter_highpass_filter(self.signal, cutoff_high, fs, order_high)
+        self.high_signal = np.int16(output_high / down_sampling_factor)
         del output_high
 
         low_band = MIN_BAND
         high_band = MAX_BAND
         order_band = 2
 
-        output_band = self.butter_bandpass_filter(signal, low_band, high_band, fs, order_band)
-        band_signal = np.int16(output_band / down_sampling_factor)
+        output_band = self.butter_bandpass_filter(self.signal, low_band, high_band, fs, order_band)
+        self.band_signal = np.int16(output_band / down_sampling_factor)
         del output_band
 
-        self.output_sum = np.empty((len(low_signal), 2))
+        self.output_sum = np.empty((len(self.low_signal), 2))
 
         p = pyaudio.PyAudio()
-        stream = p.open(format=p.get_format_from_width(spec_indicator.getsampwidth()),
-                        channels=spec_indicator.getnchannels(),
+        self.stream = p.open(format=p.get_format_from_width(self.spec_indicator.getsampwidth()),
+                        channels=self.spec_indicator.getnchannels(),
                         rate=fs,
                         output=True,
                         stream_callback=self.callback)
 
-        stream.start_stream()
-        while stream.is_active() and self.isStreamActive:
+        self.stream.start_stream()
 
-            self.output_sum = np.int16(self.low_coefficient * low_signal) \
-                         + np.int16(self.band_coefficient * band_signal) \
-                         + np.int16(self.high_coefficient * high_signal)
+    def play(self):
+        while self.stream.is_active():
+            self.output_sum = np.int16(self.low_coefficient * self.low_signal) \
+                        + np.int16(self.band_coefficient * self.band_signal) \
+                        + np.int16(self.high_coefficient * self.high_signal)
 
-            time.sleep(0.1)
+            time.sleep(0.05)
 
-        stream.stop_stream()
-        stream.close()
-        spec_indicator.close()
-        p.terminate()
+        if(not self.is_stream_paused()):
+            self.stream.stop_stream()
+            self.stream.close()
+            self.spec_indicator.close()
+            p.terminate()
+            self.is_thread_alive = False
 
-def main():
-    test = Filter('Sample.wav')
-    test.playStream()
-
-
-if __name__ == '__main__':
-    main()
+    def run(self):
+        self.before_run()
+        while self.is_thread_alive:
+            if not self.is_stream_paused():
+                self.play()
+            time.sleep(1)
